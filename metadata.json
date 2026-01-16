@@ -1,0 +1,5 @@
+{
+  "name": "LectureNote AI",
+  "description": "Convert long VTT transcripts into structured, evidence-based PDF lecture notes with chapters, key concepts, and actionable checklists.",
+  "requestFramePermissions": []
+}
