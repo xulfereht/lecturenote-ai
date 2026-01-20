@@ -197,7 +197,62 @@ function formatTime(totalSeconds) {
 }
 
 // 텍스트를 타임스탬프 기반으로 세그먼트로 분할 (30분 단위)
-function splitIntoSegments(transcript, segmentMinutes = 30) {
+
+// 문자 수 기준 세그먼트 분할 (타임스탬프 없는 텍스트용)
+function splitByCharCount(transcript, charsPerSegment = 10000) {
+    const paragraphs = transcript.split(/\n\s*\n/); // 빈 줄 기준 문단 분리
+    const segments = [];
+    let currentText = '';
+    let segmentIndex = 0;
+
+    for (const para of paragraphs) {
+        const trimmedPara = para.trim();
+        if (!trimmedPara) continue;
+
+        // 현재 세그먼트에 추가했을 때 제한 초과하면 새 세그먼트 시작
+        if (currentText.length > 0 && (currentText.length + trimmedPara.length + 2) > charsPerSegment) {
+            segments.push({
+                segmentIndex: segmentIndex++,
+                startTime: "",
+                endTime: "",
+                startSeconds: 0,
+                endSeconds: 0,
+                text: currentText.trim()
+            });
+            currentText = '';
+        }
+
+        currentText += (currentText ? '\n\n' : '') + trimmedPara;
+    }
+
+    // 마지막 세그먼트 추가
+    if (currentText.trim()) {
+        segments.push({
+            segmentIndex: segmentIndex,
+            startTime: "",
+            endTime: "",
+            startSeconds: 0,
+            endSeconds: 0,
+            text: currentText.trim()
+        });
+    }
+
+    // 세그먼트가 없으면 전체를 하나로
+    if (segments.length === 0) {
+        return [{
+            segmentIndex: 0,
+            startTime: "",
+            endTime: "",
+            startSeconds: 0,
+            endSeconds: 0,
+            text: transcript
+        }];
+    }
+
+    return segments;
+}
+
+function splitIntoSegments(transcript, segmentMinutes = 30, charsPerSegment = 10000) {
     const segmentSeconds = segmentMinutes * 60;
     const lines = transcript.split('\n');
     const timePattern = /(?:\[)?(\d{1,2}:\d{2}(?::\d{2})?)(?:\])?/;
@@ -216,18 +271,11 @@ function splitIntoSegments(transcript, segmentMinutes = 30) {
     }
 
     if (timestamps.length === 0) {
-        // 타임스탬프가 없으면 전체를 하나의 세그먼트로
-        return [{
-            segmentIndex: 0,
-            startTime: "00:00",
-            endTime: "00:00",
-            startSeconds: 0,
-            endSeconds: 0,
-            text: transcript
-        }];
+        // 타임스탬프가 없으면 문자 수 기준으로 분할
+        return splitByCharCount(transcript, charsPerSegment);
     }
 
-    // 세그먼트 분할
+    // 세그먼트 분할 (시간 기준)
     const segments = [];
     const totalDuration = lastTime;
     const numSegments = Math.ceil(totalDuration / segmentSeconds);
@@ -313,14 +361,23 @@ app.post('/api/lectures', async (req, res) => {
 
         // 세그먼트 처리 함수
         const processSegment = async (segment, idx) => {
+            const hasTimestamp = segment.startTime && segment.endTime;
+            const segmentHeader = hasTimestamp
+                ? `이 세그먼트(${segment.startTime} ~ ${segment.endTime})에서 챕터를 추출하세요.`
+                : `세그먼트 ${idx + 1}/${segments.length}에서 챕터를 추출하세요.`;
+
+            const timeRule = hasTimestamp
+                ? `- 타임스탬프는 세그먼트 내 실제 시간 기준으로 정확히`
+                : `- 타임스탬프가 없으므로 startTime/endTime은 빈 문자열("")로 반환`;
+
             const prompt = `
-이 세그먼트(${segment.startTime} ~ ${segment.endTime})에서 챕터를 추출하세요.
+${segmentHeader}
 
 ## 규칙
 - 챕터당 10-15분 분량 (8-20분 유동 가능)
 - 주제 전환 지점에서 분할
 - 구체적인 제목 사용 (예: "REF GPT 설정 방법")
-- 타임스탬프는 세그먼트 내 실제 시간 기준으로 정확히
+${timeRule}
 
 ## 세그먼트 텍스트:
 ${segment.text}
