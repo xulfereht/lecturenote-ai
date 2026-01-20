@@ -425,23 +425,31 @@ ${segment.text}
 
         // ========== Step 3: 챕터 병합 ==========
         let allChapters = [];
+        const hasTimestamps = segments.some(s => s.startTime && s.endTime);
+
         for (const result of segmentResults.sort((a, b) => a.segmentIndex - b.segmentIndex)) {
             for (const ch of result.chapters) {
-                // 중복 체크 (시간 기준 ±2분 내 유사 챕터 스킵)
-                const chStartSec = parseTime(ch.startTime);
-                const isDuplicate = allChapters.some(existing => {
-                    const existingStart = parseTime(existing.startTime);
-                    return Math.abs(existingStart - chStartSec) < 120; // 2분 이내면 중복
-                });
-
-                if (!isDuplicate) {
+                if (hasTimestamps) {
+                    // 타임스탬프 있음: 시간 기준 중복 체크 (±2분 내 유사 챕터 스킵)
+                    const chStartSec = parseTime(ch.startTime);
+                    const isDuplicate = allChapters.some(existing => {
+                        const existingStart = parseTime(existing.startTime);
+                        return Math.abs(existingStart - chStartSec) < 120;
+                    });
+                    if (!isDuplicate) {
+                        allChapters.push(ch);
+                    }
+                } else {
+                    // 타임스탬프 없음: 모든 챕터 포함 (세그먼트 순서대로)
                     allChapters.push(ch);
                 }
             }
         }
 
-        // 시간순 정렬
-        allChapters.sort((a, b) => parseTime(a.startTime) - parseTime(b.startTime));
+        // 시간순 정렬 (타임스탬프 있을 때만)
+        if (hasTimestamps) {
+            allChapters.sort((a, b) => parseTime(a.startTime) - parseTime(b.startTime));
+        }
 
         // ID 부여
         allChapters = allChapters.map((ch, idx) => ({
