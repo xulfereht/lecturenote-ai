@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus, Book, BookOpen, Layout, Loader2, FileText,
-  ChevronRight, RefreshCw, Download, Upload
+  ChevronRight, RefreshCw, Download, Upload, Settings
 } from 'lucide-react';
 import { LecturePreview } from './components/LecturePreview';
+import { SettingsTab } from './components/SettingsTab';
+import { useSettings } from './hooks/useSettings';
 
 // 타입 정의 (서버 응답 맞춤)
 interface LectureSummary {
@@ -43,9 +45,13 @@ const App: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [lectureData, setLectureData] = useState<LectureDetail | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [isShowingSettings, setIsShowingSettings] = useState(false);
   const [inputText, setInputText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // AI Settings hook
+  const { settings, hasApiKey } = useSettings();
 
   // 1. 강의 목록 로드
   const fetchLectures = async () => {
@@ -115,10 +121,22 @@ const App: React.FC = () => {
     if (!inputText.trim()) return;
     setIsSubmitting(true);
     try {
+      // Pass settings to the server for preprocessing
+      const requestBody = {
+        transcript: inputText,
+        settings: {
+          apiKey: settings.apiKey,
+          model: settings.model,
+          llmCorrectionEnabled: settings.llmCorrectionEnabled,
+          temperature: settings.temperature,
+          maxTokens: settings.maxTokens
+        }
+      };
+
       const res = await fetch('http://localhost:3000/api/lectures', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript: inputText })
+        body: JSON.stringify(requestBody)
       });
 
       if (!res.ok) {
@@ -180,9 +198,9 @@ const App: React.FC = () => {
           {lectures.map(lec => (
             <button
               key={lec.id}
-              onClick={() => { setSelectedId(lec.id); setIsCreating(false); }}
+              onClick={() => { setSelectedId(lec.id); setIsCreating(false); setIsShowingSettings(false); }}
               className={`w-full text-left px-3 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-2
-                ${selectedId === lec.id && !isCreating
+                ${selectedId === lec.id && !isCreating && !isShowingSettings
                   ? 'bg-white shadow-sm text-indigo-700 border border-gray-200'
                   : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'}`}
             >
@@ -192,13 +210,27 @@ const App: React.FC = () => {
           ))}
         </div>
 
-        <div className="p-4 border-t border-gray-200">
+        <div className="p-4 border-t border-gray-200 space-y-2">
           <button
-            onClick={() => { setIsCreating(true); setSelectedId(null); }}
+            onClick={() => { setIsCreating(true); setSelectedId(null); setIsShowingSettings(false); }}
             className="w-full flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-lg font-medium transition-all shadow-sm hover:shadow active:scale-95"
           >
             <Plus className="w-4 h-4" />
             New Lecture
+          </button>
+          <button
+            onClick={() => { setIsShowingSettings(true); setIsCreating(false); setSelectedId(null); }}
+            className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-lg font-medium transition-all ${
+              isShowingSettings
+                ? 'bg-gray-200 text-gray-900'
+                : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
+            }`}
+          >
+            <Settings className="w-4 h-4" />
+            Settings
+            {!hasApiKey && (
+              <span className="w-2 h-2 bg-amber-500 rounded-full animate-pulse" />
+            )}
           </button>
         </div>
       </div>
@@ -274,8 +306,19 @@ const App: React.FC = () => {
           </div>
         )}
 
+        {/* Settings View */}
+        {isShowingSettings && (
+          <SettingsTab
+            onClose={() => setIsShowingSettings(false)}
+            onSave={() => {
+              // Settings are auto-saved by the hook
+              // Just show feedback that settings are applied
+            }}
+          />
+        )}
+
         {/* Detail View */}
-        {!isCreating && selectedId && lectureData && (
+        {!isCreating && !isShowingSettings && selectedId && lectureData && (
           <div className="flex-1 flex flex-col overflow-hidden">
             {/* Header */}
             <div className="h-16 border-b border-gray-200 flex items-center justify-between px-6 bg-white shrink-0 z-10">
@@ -350,7 +393,7 @@ const App: React.FC = () => {
         )}
 
         {/* Empty State */}
-        {!isCreating && !selectedId && (
+        {!isCreating && !isShowingSettings && !selectedId && (
           <div className="flex-1 flex flex-col items-center justify-center text-gray-400">
             <BookOpen className="w-16 h-16 mb-4 opacity-20" />
             <p className="text-lg font-medium">Select a lecture from the sidebar</p>

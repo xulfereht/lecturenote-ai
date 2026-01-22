@@ -8,6 +8,11 @@ import puppeteer from 'puppeteer';
 import { marked } from 'marked';
 import { createRequire } from 'module';
 
+// Import preprocessing modules
+import { normalizeText } from './utils/textNormalizer.js';
+import { createAIProvider } from './ai/aiProvider.js';
+import { correctSegmentsBatch, applyCorrections, getCorrectionStats } from './utils/llmCorrector.js';
+
 const require = createRequire(import.meta.url);
 const { initDB, run, get, all } = require('./database.cjs');
 
@@ -29,6 +34,127 @@ app.use(express.json({ limit: '50mb' }));
 
 // Init DB
 initDB().then(() => console.log('SQLite DB initialized')).catch(err => console.error(err));
+
+// ==================== PREPROCESSING ====================
+
+/**
+ * Preprocess transcript text before analysis
+ * Applies normalization and optional LLM correction
+ *
+ * @param {string} transcript - Raw transcript text
+ * @param {Object} options - Preprocessing options
+ * @param {boolean} options.llmCorrectionEnabled - Whether to use LLM for correction
+ * @param {string} options.apiKey - API key for LLM correction
+ * @param {string} options.model - Model to use for LLM correction
+ * @returns {Promise<Object>} Preprocessed result with text and stats
+ */
+async function preprocessTranscript(transcript, options = {}) {
+    const startTime = Date.now();
+    const stats = {
+        originalLength: transcript.length,
+        normalizedLength: 0,
+        correctedLength: 0,
+        normalizationChanges: {},
+        correctionStats: null,
+        processingTimeMs: 0
+    };
+
+    // Step 1: Basic text normalization (always applied)
+    console.log('[Preprocess] Starting text normalization...');
+    const normResult = normalizeText(transcript, {
+        preserveTimestamps: true,
+        normalizeWhitespace: true,
+        removeControlChars: true,
+        removeBOM: true,
+        trimLines: true,
+        collapseBlankLines: true,
+        maxBlankLines: 2
+    });
+
+    let processedText = normResult.text;
+    stats.normalizedLength = processedText.length;
+    stats.normalizationChanges = normResult.changeLog;
+
+    console.log(`[Preprocess] Normalization complete: ${stats.originalLength} -> ${stats.normalizedLength} chars`);
+
+    // Step 2: LLM-based correction (optional)
+    if (options.llmCorrectionEnabled && options.apiKey) {
+        console.log('[Preprocess] Starting LLM correction...');
+
+        try {
+            // Create AI provider for correction
+            const aiProvider = createAIProvider({
+                provider: 'google',
+                model: options.model || 'gemini-2.5-flash',
+                apiKey: options.apiKey,
+                temperature: 0.3
+            });
+
+            // Split text into manageable segments for correction
+            const segmentSize = 3000;
+            const segments = [];
+            let remaining = processedText;
+
+            while (remaining.length > 0) {
+                if (remaining.length <= segmentSize) {
+                    segments.push({ text: remaining });
+                    break;
+                }
+
+                // Find a good break point (paragraph or sentence)
+                let breakPoint = remaining.lastIndexOf('\n\n', segmentSize);
+                if (breakPoint < segmentSize / 2) {
+                    breakPoint = remaining.lastIndexOf('\n', segmentSize);
+                }
+                if (breakPoint < segmentSize / 2) {
+                    breakPoint = remaining.lastIndexOf('. ', segmentSize);
+                }
+                if (breakPoint < 0 || breakPoint > segmentSize) {
+                    breakPoint = segmentSize;
+                }
+
+                segments.push({ text: remaining.substring(0, breakPoint) });
+                remaining = remaining.substring(breakPoint).trim();
+            }
+
+            console.log(`[Preprocess] Correcting ${segments.length} segments...`);
+
+            // Apply LLM correction to segments
+            const corrections = await correctSegmentsBatch(segments, aiProvider, {
+                enabled: true,
+                batchSize: 2,
+                preserveTimestamps: true,
+                correctTechnicalTerms: true,
+                correctMishearings: true
+            });
+
+            // Apply corrections and get stats
+            const correctedSegments = applyCorrections(segments, corrections);
+            stats.correctionStats = getCorrectionStats(corrections);
+
+            // Rejoin segments
+            processedText = correctedSegments.map(s => s.text || s).join('\n\n');
+            stats.correctedLength = processedText.length;
+
+            console.log(`[Preprocess] LLM correction complete: ${stats.correctionStats.totalCorrectionsApplied} corrections applied`);
+
+        } catch (error) {
+            console.error('[Preprocess] LLM correction failed:', error.message);
+            // Continue with normalized text if correction fails
+            stats.correctedLength = stats.normalizedLength;
+        }
+    } else {
+        stats.correctedLength = stats.normalizedLength;
+    }
+
+    stats.processingTimeMs = Date.now() - startTime;
+    console.log(`[Preprocess] Complete in ${stats.processingTimeMs}ms`);
+
+    return {
+        text: processedText,
+        stats
+    };
+}
 
 // ==================== SCHEMAS ====================
 const INITIAL_SCAN_SCHEMA = {
@@ -342,17 +468,31 @@ const SEGMENT_CHAPTER_SCHEMA = {
 // 1. 강의 생성 및 자동 분석 시작 (세그먼트 기반 병렬 처리)
 app.post('/api/lectures', async (req, res) => {
     try {
-        const { transcript } = req.body;
+        const { transcript, settings } = req.body;
         if (!transcript) return res.status(400).json({ error: "Transcript required" });
 
         const lectureId = generateId();
-        const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+        const apiKey = settings?.apiKey || process.env.GEMINI_API_KEY || process.env.API_KEY;
         const ai = new GoogleGenAI({ apiKey });
 
+        console.log(`[${lectureId}] Starting lecture processing...`);
+
+        // ========== Step 0: Preprocessing ==========
+        const preprocessOptions = {
+            llmCorrectionEnabled: settings?.llmCorrectionEnabled || false,
+            apiKey: apiKey,
+            model: settings?.model || 'gemini-2.5-flash'
+        };
+
+        console.log(`[${lectureId}] Preprocessing transcript (LLM correction: ${preprocessOptions.llmCorrectionEnabled})...`);
+        const preprocessResult = await preprocessTranscript(transcript, preprocessOptions);
+        const processedTranscript = preprocessResult.text;
+
+        console.log(`[${lectureId}] Preprocessing stats:`, JSON.stringify(preprocessResult.stats, null, 2));
         console.log(`[${lectureId}] Starting segmented analysis...`);
 
         // ========== Step 1: 세그먼트 분할 (로컬) ==========
-        const segments = splitIntoSegments(transcript, 30); // 30분 단위
+        const segments = splitIntoSegments(processedTranscript, 30); // 30분 단위
         console.log(`[${lectureId}] Split into ${segments.length} segments`);
 
         // ========== Step 2: 세그먼트별 챕터 추출 (배치 처리) ==========
@@ -501,7 +641,7 @@ JSON 형식으로 출력:
 
         // ========== Step 5: DB 저장 ==========
         await run(`INSERT INTO lectures (id, title, raw_text) VALUES (?, ?, ?)`,
-            [lectureId, lectureTitle, transcript]);
+            [lectureId, lectureTitle, processedTranscript]);
 
         let chapterOrder = 0;
         for (const ch of allChapters) {
@@ -520,7 +660,7 @@ JSON 형식으로 출력:
         res.json({ id: lectureId, title: lectureTitle, totalChapters: allChapters.length });
 
         // ========== Step 7: 백그라운드 Deep Dive ==========
-        processLectureBackground(lectureId, scanJson, transcript).catch(console.error);
+        processLectureBackground(lectureId, scanJson, processedTranscript).catch(console.error);
 
     } catch (error) {
         console.error("Error creating lecture:", error);
