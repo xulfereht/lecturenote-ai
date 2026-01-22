@@ -22,3 +22,131 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+*.sqlite3
+.claude/settings.local.json
+out/
+# Test Coverage
+# Updated: 2026-01-10
+*.egg-info/
+*.backup/
+# Windows
+# Backups
+htmlcov/
+.claude/skills/*/*/*token*
+.cursor/
+*.tmp
+# Logs & Temporary Files
+*-secret-key.*
+.vercel/
+.coverage
+.claude/settings.local.*.json
+*~
+*.rdb
+.TemporaryItems
+.venv/
+*.pfx
+# Build Tools & Frameworks
+# Purpose: Essential patterns for user projects
+*.dbm
+.env
+*.backup
+venv/
+.turbo/
+.directory
+# Claude Code Configuration
+*.tsbuildinfo
+.DocumentRevisions-V100
+.claude/plans/
+# Skill-specific credentials
+dist-ssr/
+.LSOverride
+[Dd]esktop.ini
+# Secrets and Credentials (CRITICAL)
+.VolumeIcon.icns
+.uv_cache/
+.uv-cache/
+*.jks
+private-key*
+*-secret.*
+.vscode/
+*_secret.*
+Thumbs.db
+*_backup_*/
+# Private keys (specific patterns to avoid false positives)
+.fseventsd
+.claude/skills/*/.env*
+# Cloud provider credentials
+.claude/skills/*/*/*key*
+*_key.*
+.aws/credentials
+*.swo
+# ===========================================
+*.db
+*.pyc
+*.pyd
+# OS Files
+*.swp
+.ruff_cache/
+*.pyo
+.next/
+.Spotlight-V100
+# Credential patterns in environment files
+secret-key-*
+# Node.js (for docs/Nextra)
+.tscache/
+.netlify/
+.moai-backups/
+.env.*
+*-api-key.*
+# Certificate files
+*_token=*
+*-backup/
+env/
+.nuxt/
+# Python Cache & Bytecode
+*.sublime-workspace
+# FIXED: Issue #237 - Replaced overly broad *key* and *secret* patterns
+*.sublime-project
+*-key.*
+.#*
+# Mac
+# Deployment & CI/CD
+# Virtual Environments
+.Trashes
+*.bak
+.claude/skills/*/secrets/
+# IDE & Editors
+*.egg
+node_modules/
+secret-*.*
+.env/
+*.key.*
+# Build Artifacts & Distribution
+.firebase/
+*.sqlite
+*.p12
+ehthumbs.db
+.pytest_cache/
+# MoAI-ADK Package Distribution .gitignore
+*.secret.*
+dist/
+.claude/local/
+coverage.json
+*.pem
+!.env.example
+.AppleDouble
+*.temp
+api-key-*
+.aws/config
+# Version: 0.33.0
+logs/
+.claude/skills/*/*/*secret*
+__pycache__/
+# ============================================
+.claude/.env.local*
+.idea/
+# Linux
+# Environment files
+*_secret=*
+.mypy_cache/
+build/

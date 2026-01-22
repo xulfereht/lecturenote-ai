@@ -1,0 +1,26 @@
+constitution:
+  development_mode: ddd
+  enforce_quality: true
+  test_coverage_target: 85
+  ddd_settings:
+    require_existing_tests: true
+    characterization_tests: true
+    behavior_snapshots: true
+    max_transformation_size: small
+  coverage_exemptions:
+    enabled: false
+    require_justification: true
+    max_exempt_percentage: 5
+  test_quality:
+    specification_based: true
+    meaningful_assertions: true
+    avoid_implementation_coupling: true
+    mutation_testing_enabled: false
+  principles:
+    simplicity:
+      max_parallel_tasks: 10
+report_generation:
+  enabled: true
+  auto_create: false
+  warn_user: true
+  user_choice: Minimal
