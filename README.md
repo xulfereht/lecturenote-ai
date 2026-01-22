@@ -37,8 +37,8 @@ lecturenote-ai/
 │   └── vttParser.ts        # VTT 파싱 유틸리티
 ├── server/
 │   ├── index.js            # Express 서버 (API 엔드포인트, Gemini 호출)
-│   ├── database.cjs        # SQLite DB 초기화 및 쿼리 함수
-│   └── lecture_notes.db    # SQLite 데이터베이스 파일
+│   └── database.cjs        # SQLite DB 초기화 및 쿼리 함수
+│                           # (lecture_notes.db는 서버 실행 시 자동 생성)
 ├── package.json
 ├── vite.config.ts
 └── tsconfig.json
