@@ -13,6 +13,13 @@ function initDB() {
         id TEXT PRIMARY KEY,
         title TEXT,
         raw_text TEXT,
+        original_text TEXT,
+        correction_stats TEXT,
+        author TEXT,
+        source_url TEXT,
+        tags TEXT, -- JSON string array
+        memo TEXT,
+        final_summary TEXT, -- JSON string
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`);
 
@@ -22,6 +29,8 @@ function initDB() {
         lecture_id TEXT,
         chapter_number INTEGER,
         title TEXT,
+        start_time TEXT,
+        end_time TEXT,
         summary TEXT,
         narrative TEXT,
         threeline_note TEXT,
@@ -29,10 +38,28 @@ function initDB() {
         quiz TEXT,
         status TEXT DEFAULT 'pending', -- pending, processing, completed, error
         FOREIGN KEY(lecture_id) REFERENCES lectures(id)
-      )`, (err) => {
-                if (err) reject(err);
-                else resolve();
+      )`);
+
+            // 마이그레이션: 기존 테이블에 컬럼 추가
+            const columnsToAdd = ['original_text', 'correction_stats', 'author', 'source_url', 'tags', 'memo', 'final_summary', 'overview'];
+            columnsToAdd.forEach(col => {
+                db.run(`ALTER TABLE lectures ADD COLUMN ${col} TEXT`, (err) => { /* ignore */ });
             });
+
+            // 챕터 테이블 마이그레이션
+            const chapColumnsToAdd = ['start_time', 'end_time'];
+            chapColumnsToAdd.forEach(col => {
+                db.run(`ALTER TABLE chapters ADD COLUMN ${col} TEXT`, (err) => { /* ignore */ });
+            });
+
+            // 서버 재시작 시 processing 상태로 멈춘 챕터들을 pending으로 복구
+            db.run(`UPDATE chapters SET status = 'pending' WHERE status = 'processing'`, function(err) {
+                if (!err && this.changes > 0) {
+                    console.log(`[Recovery] ${this.changes} stuck chapter(s) reset to pending`);
+                }
+            });
+
+            resolve();
         });
     });
 }

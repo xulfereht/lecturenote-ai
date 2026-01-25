@@ -21,6 +21,7 @@ import { Type } from "@google/genai";
  * @property {boolean} [preserveTimestamps=true] - Preserve timestamp patterns
  * @property {boolean} [correctTechnicalTerms=true] - Correct technical terminology
  * @property {boolean} [correctMishearings=true] - Correct speech-to-text errors
+ * @property {boolean} [semanticFactCheck=true] - Perform semantic fact checking to correct wrong information
  * @property {string} [language='ko'] - Primary language of content
  */
 
@@ -40,11 +41,12 @@ import { Type } from "@google/genai";
  */
 const DEFAULT_CONFIG = {
     enabled: true,
-    batchSize: 3,
-    maxSegmentLength: 5000,
+    batchSize: 8, // Increased for better parallelism
+    maxSegmentLength: 2500,
     preserveTimestamps: true,
     correctTechnicalTerms: true,
     correctMishearings: true,
+    semanticFactCheck: true,
     language: 'ko'
 };
 
@@ -52,16 +54,16 @@ const DEFAULT_CONFIG = {
  * System prompt for LLM correction
  * @type {string}
  */
-const CORRECTION_SYSTEM_PROMPT = `당신은 강의 녹취록 교정 전문가입니다.
-음성 인식으로 생성된 텍스트의 오류를 교정하는 것이 임무입니다.
+const CORRECTION_SYSTEM_PROMPT = `당신은 강의 녹취록 교정 및 팩트체크 전문가입니다.
+음성 인식으로 생성된 텍스트의 오류를 교정하고, 문맥상 잘못된 정보나 사실관계가 틀린 내용을 시맨틱하게 바로잡는 것이 임무입니다.
 
 핵심 규칙:
-1. 타임스탬프([HH:MM:SS] 또는 [MM:SS] 형식)는 절대 수정하지 마세요
-2. 문맥을 고려하여 오청취된 단어를 교정하세요
-3. 전문용어는 올바른 표기로 통일하세요
-4. 원문의 의미를 변경하지 마세요
-5. 불필요한 반복이나 말더듬은 정리하세요
-6. 문장 구조는 가능한 유지하세요`;
+1. 타임스탬프([HH:MM:SS] 또는 [MM:SS] 형식)는 절대 수정하지 마세요.
+2. 문맥을 고려하여 오청취된 단어를 교정하세요.
+3. 전문용어는 올바른 표기로 통일하세요.
+4. **팩트체크**: 명백히 사실과 다른 내용(잘못된 연도, 틀린 기술명, 반대로 말한 내용 등)이 있다면 올바른 정보로 수정하세요. 단, 강사의 고유한 의견이나 주관적인 주장은 수정하지 마세요.
+5. 불필요한 반복이나 말더듬은 정리하세요.
+6. 문장 구조는 가능한 유지하되, 비문은 자연스럽게 다듬으세요.`;
 
 /**
  * Schema for correction response
@@ -70,29 +72,20 @@ const CORRECTION_SYSTEM_PROMPT = `당신은 강의 녹취록 교정 전문가입
 const CORRECTION_SCHEMA = {
     type: Type.OBJECT,
     properties: {
-        correctedText: {
-            type: Type.STRING,
-            description: "교정된 텍스트 (타임스탬프 보존)"
-        },
         corrections: {
             type: Type.ARRAY,
             items: {
                 type: Type.OBJECT,
                 properties: {
-                    original: { type: Type.STRING, description: "원본 텍스트" },
+                    original: { type: Type.STRING, description: "원본 텍스트 (수정할 부분만)" },
                     corrected: { type: Type.STRING, description: "교정된 텍스트" },
-                    reason: { type: Type.STRING, description: "교정 이유 (typo/mishearing/terminology)" }
+                    reason: { type: Type.STRING, description: "교정 이유" }
                 },
                 required: ["original", "corrected", "reason"]
-            },
-            description: "교정 내역 목록"
-        },
-        confidence: {
-            type: Type.NUMBER,
-            description: "교정 신뢰도 (0.0-1.0)"
+            }
         }
     },
-    required: ["correctedText", "corrections"]
+    required: ["corrections"]
 };
 
 /**
@@ -105,29 +98,26 @@ function buildCorrectionPrompt(text, config) {
     const instructions = [];
 
     if (config.preserveTimestamps) {
-        instructions.push("- 타임스탬프([HH:MM:SS] 또는 [MM:SS])를 절대 수정하지 마세요");
+        instructions.push("- 타임스탬프([HH:MM:SS] 등)는 절대 건드리지 마세요.");
     }
 
     if (config.correctTechnicalTerms) {
-        instructions.push("- IT/AI 관련 전문용어를 올바른 표기로 통일하세요 (예: GPT, LLM, AI, API 등)");
+        instructions.push("- 전문용어 표기를 통일하세요.");
     }
 
-    if (config.correctMishearings) {
-        instructions.push("- 음성 인식 오류로 인한 오청취를 문맥에 맞게 교정하세요");
-    }
+    return `다음 텍스트를 교정하세요.
+전체 텍스트를 반환하지 말고, **수정이 필요한 부분만** JSON 리스트로 반환하세요.
+수정할 곳이 없으면 빈 리스트를 반환하세요.
 
-    return `다음 강의 녹취록 텍스트를 교정하세요.
-
-## 교정 규칙
+## 규칙
 ${instructions.join('\n')}
-- 원문의 의미와 문체를 최대한 유지하세요
-- 확실하지 않은 교정은 하지 마세요
+- 'original'은 원본 텍스트에서 **유일하게 식별 가능한** 구절이어야 합니다.
 
-## 교정할 텍스트:
+## 텍스트:
 ${text}
 
 ## 응답 형식
-JSON 형식으로 교정 결과를 반환하세요.`;
+JSON: { "corrections": [ { "original": "...", "corrected": "...", "reason": "..." } ] }`;
 }
 
 /**
@@ -186,9 +176,23 @@ export async function correctWithLLM(segment, aiProvider, config = {}) {
         }
 
         const result = response.data;
+        const correctionsList = result.corrections || [];
+
+        // Reconstruct text by applying corrections
+        let finalText = textToProcess;
+        let validCorrections = [];
+
+        for (const correction of correctionsList) {
+            if (correction.original && correction.corrected) {
+                // 단순 replace는 위험할 수 있으나, 프롬프트에서 '유일하게 식별 가능한 구절'을 요청했으므로 시도
+                if (finalText.includes(correction.original)) {
+                    finalText = finalText.replace(correction.original, correction.corrected);
+                    validCorrections.push(correction);
+                }
+            }
+        }
 
         // If segment was truncated, append the rest
-        let finalText = result.correctedText;
         if (segment.length > cfg.maxSegmentLength) {
             finalText += segment.substring(cfg.maxSegmentLength);
         }
@@ -196,8 +200,8 @@ export async function correctWithLLM(segment, aiProvider, config = {}) {
         return {
             originalText: segment,
             correctedText: finalText,
-            corrections: result.corrections || [],
-            confidence: result.confidence,
+            corrections: validCorrections,
+            confidence: 1.0, // Calculated confidence is gone with this method
             success: true
         };
 
@@ -253,9 +257,9 @@ export async function correctSegmentsBatch(segments, aiProvider, config = {}) {
         const batchResults = await Promise.all(batchPromises);
         results.push(...batchResults);
 
-        // Rate limiting delay between batches
+        // Rate limiting delay between batches (reduced)
         if (i + batchSize < segments.length) {
-            await sleep(500);
+            await sleep(100);
         }
     }
 

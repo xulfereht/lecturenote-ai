@@ -223,11 +223,22 @@ export class GeminiProvider extends AIProvider {
 
                 // Parse JSON response if schema was provided
                 if (schema) {
-                    const cleanText = rawText
-                        .replace(/```json/g, '')
-                        .replace(/```/g, '')
-                        .trim();
-                    data = JSON.parse(cleanText);
+                    try {
+                        let cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+                        // Find the first '{' and last '}' to handle extra text
+                        const firstBrace = cleanText.indexOf('{');
+                        const lastBrace = cleanText.lastIndexOf('}');
+                        
+                        if (firstBrace !== -1 && lastBrace !== -1) {
+                            cleanText = cleanText.substring(firstBrace, lastBrace + 1);
+                        }
+                        
+                        data = JSON.parse(cleanText);
+                    } catch (e) {
+                        console.warn('JSON Parse Error:', e.message);
+                        console.warn('Raw Text Preview:', rawText.substring(0, 200) + '...');
+                        throw new Error(`Failed to parse JSON response: ${e.message}`);
+                    }
                 } else {
                     data = rawText;
                 }

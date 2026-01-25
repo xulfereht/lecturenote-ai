@@ -1,11 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Plus, Book, BookOpen, Layout, Loader2, FileText,
-  ChevronRight, RefreshCw, Download, Upload, Settings
+  ChevronRight, RefreshCw, Download, Upload, Settings, CheckCircle, Info
 } from 'lucide-react';
 import { LecturePreview } from './components/LecturePreview';
 import { SettingsTab } from './components/SettingsTab';
+import { CorrectionReportModal } from './components/CorrectionReportModal';
+import { MetadataModal } from './components/MetadataModal';
 import { useSettings } from './hooks/useSettings';
+import { CorrectionStats, FinalSummary } from './types';
 
 // 타입 정의 (서버 응답 맞춤)
 interface LectureSummary {
@@ -21,23 +24,32 @@ interface Chapter {
   status: 'pending' | 'processing' | 'completed' | 'error';
   startTime: string;
   endTime: string;
-  // 서버에서는 content로 묶어서 보내거나, detailed_note 컬럼에 JSON으로 저장됨
-  // 클라이언트에서 flatten 과정을 거칠 예정
   narrative?: string;
   quotesWithTimeline?: any[];
   keyTerms?: any[];
   keyPoints?: string[];
+  keyTakeaways?: string[];
+  actionableItems?: string[];
+  visualStructure?: {
+    type: 'process' | 'comparison' | 'hierarchy' | 'timeline';
+    title: string;
+    items: Array<{ label: string; description?: string; subItems?: string[] }>;
+  };
+  mermaidCode?: string; // deprecated
   [key: string]: any;
 }
 
 interface LectureDetail {
   id: string;
   title: string;
-  overview?: string; // Initial Scan에서 저장 안했을 수도 있음 (스키마 확인 필요) -> raw_text만 저장하고 chapters만 저장했음 (수정 필요할 수도)
-  // ** 중요: 서버 코드 809에서 lectures 테이블에 overview 컬럼 없음. 
-  // 그러나 InitialScanSchema에는 overview가 있음. 
-  // 일단 title만 사용하거나, 첫 번째 챕터 로딩 전에는 overview가 없을 수 있음.
+  overview?: string; 
   chapters: Chapter[];
+  correction_stats?: CorrectionStats;
+  author?: string;
+  source_url?: string;
+  tags?: string[];
+  memo?: string;
+  finalSummary?: FinalSummary;
 }
 
 const App: React.FC = () => {
@@ -46,12 +58,28 @@ const App: React.FC = () => {
   const [lectureData, setLectureData] = useState<LectureDetail | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [isShowingSettings, setIsShowingSettings] = useState(false);
+  const [showCorrectionModal, setShowCorrectionModal] = useState(false);
+  const [showMetaModal, setShowMetaModal] = useState(false);
+  const [showPdfDropdown, setShowPdfDropdown] = useState(false);
   const [inputText, setInputText] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [streamingStatus, setStreamingStatus] = useState<{ message: string, active: boolean }>({ message: '', active: false });
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pdfDropdownRef = useRef<HTMLDivElement>(null);
 
   // AI Settings hook
   const { settings, hasApiKey } = useSettings();
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (pdfDropdownRef.current && !pdfDropdownRef.current.contains(event.target as Node)) {
+        setShowPdfDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   // 1. 강의 목록 로드
   const fetchLectures = async () => {
@@ -69,56 +97,129 @@ const App: React.FC = () => {
     fetchLectures();
   }, []);
 
-  // 2. 선택된 강의 폴링 (상세 조회 & 자동 갱신)
+  // 2. SSE 연결 및 데이터 폴링
   useEffect(() => {
-    if (!selectedId) return;
+    if (!selectedId) {
+        setStreamingStatus({ message: '', active: false });
+        return;
+    }
 
-    let intervalId: any;
-
+    // 초기 로딩
     const fetchDetail = async () => {
       try {
         const res = await fetch(`http://localhost:3000/api/lectures/${selectedId}`);
         if (!res.ok) return;
         const data = await res.json();
 
-        // 데이터 가공: content JSON 풀기
         const processedChapters = (data.chapters || []).map((ch: any) => {
           let contentObj = ch.content || {};
-          // 만약 content가 null이면 (아직 deep dive 전)
           return {
             ...ch,
-            ...contentObj, // narrative, quotesWithTimeline 등이 여기 들어있음
-            status: ch.status // DB status가 우선
+            ...contentObj,
+            status: ch.status
           };
         });
 
-        // LecturePreview가 기대하는 형태로 가공
+        // Overview fallback: if overview column is empty or contains placeholder, try to get from finalSummary
+        let overview = data.overview || "";
+        if (overview === "Loading overview..." || overview === "Generating overview...") {
+            overview = data.finalSummary?.oneSentenceSummary || "";
+        }
+
         setLectureData({
           ...data,
           chapters: processedChapters,
-          overview: "" // Overrview는 현재 DB에 없으므로 공란 or AI가 initial scan json을 어딘가 저장했어야 함 (TODO)
+          overview: overview
         });
-
-        // 모든 챕터가 완료되었는지 확인 (완료 안됬으면 폴링 계속)
-        const allDone = processedChapters.every((c: any) => c.status === 'completed' || c.status === 'error');
-        if (allDone && intervalId) {
-          // clearInterval(intervalId); // 완료되어도 계속 폴링? (혹시 재생성 등의 변화가 있을 수 있으니 놔둘 수도)
-          // 하지만 너무 잦은 요청 방지 위해 완료되면 interval 늘리거나 멈춤
-        }
       } catch (e) {
         console.error("Failed to fetch detail", e);
       }
     };
 
-    fetchDetail(); // 즉시 실행
-    intervalId = setInterval(fetchDetail, 3000); // 3초마다 갱신
+    fetchDetail();
 
-    return () => clearInterval(intervalId);
+    // SSE 연결
+    const eventSource = new EventSource(`http://localhost:3000/api/lectures/${selectedId}/events`);
+
+    eventSource.onopen = () => {
+        console.log("SSE Connected");
+    };
+
+    eventSource.onmessage = (event) => {
+        // 기본 메시지 핸들러 (디버깅용)
+        // console.log("SSE Message:", event.data);
+    };
+
+    // 커스텀 이벤트 리스너
+    eventSource.addEventListener('status', (e: any) => {
+        const data = JSON.parse(e.data);
+        setStreamingStatus({ message: data.message, active: true });
+    });
+
+    eventSource.addEventListener('progress', (e: any) => {
+        const data = JSON.parse(e.data);
+        setStreamingStatus({ message: data.message, active: true });
+    });
+
+    eventSource.addEventListener('chapter_complete', (e: any) => {
+        const data = JSON.parse(e.data);
+        setStreamingStatus({ message: `Completed: ${data.title}`, active: true });
+        fetchDetail(); // 데이터 갱신
+    });
+
+    eventSource.addEventListener('chapter_error', (e: any) => {
+        const data = JSON.parse(e.data);
+        setStreamingStatus({ message: `Error in chapter: ${data.message}`, active: true });
+        fetchDetail(); // 상태 갱신
+    });
+
+    eventSource.addEventListener('final_summary_complete', (e: any) => {
+        setStreamingStatus({ message: 'Final Summary completed!', active: true });
+        fetchDetail(); // Refresh to get the new final summary
+        setTimeout(() => setStreamingStatus({ message: '', active: false }), 3000);
+    });
+
+    eventSource.addEventListener('complete', (e: any) => {
+        setStreamingStatus({ message: 'All analysis finished', active: false });
+        fetchDetail();
+        // 3초 후 메시지 사라짐
+        setTimeout(() => setStreamingStatus({ message: '', active: false }), 3000);
+        eventSource.close();
+    });
+
+    eventSource.addEventListener('error', (e: any) => {
+        // SSE 에러가 아니라 서버가 보낸 'error' 이벤트
+        if (e.data) {
+            const data = JSON.parse(e.data);
+            console.error("Server reported error:", data.message);
+            setStreamingStatus({ message: `Error: ${data.message}`, active: false });
+        }
+    });
+
+    eventSource.onerror = (err) => {
+        // 네트워크 에러 등
+        console.log("SSE Connection closed or failed", err);
+        eventSource.close();
+        setStreamingStatus(prev => ({ ...prev, active: false }));
+    };
+
+    return () => {
+        eventSource.close();
+    };
   }, [selectedId]);
 
   // 3. 새 강의 생성 핸들러
   const handleCreate = async () => {
     if (!inputText.trim()) return;
+
+    // Check for API Key before submission
+    if (!hasApiKey) {
+      alert("API Key is required. Please configure it in Settings.");
+      setIsCreating(false);
+      setIsShowingSettings(true);
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       // Pass settings to the server for preprocessing
@@ -170,10 +271,10 @@ const App: React.FC = () => {
   };
 
   // 5. PDF 내보내기 핸들러
-  const handleExportPDF = async () => {
+  const handleExportPDF = async (type: 'full' | 'summary' = 'full') => {
     if (!selectedId) return;
     try {
-      window.open(`http://localhost:3000/api/lectures/${selectedId}/pdf`, '_blank');
+      window.open(`http://localhost:3000/api/lectures/${selectedId}/pdf?type=${type}`, '_blank');
     } catch (e) {
       alert("다운로드 실패");
     }
@@ -196,10 +297,10 @@ const App: React.FC = () => {
             Library
           </div>
           {lectures.map(lec => (
+            <div key={lec.id} className="group relative">
             <button
-              key={lec.id}
               onClick={() => { setSelectedId(lec.id); setIsCreating(false); setIsShowingSettings(false); }}
-              className={`w-full text-left px-3 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-2
+              className={`w-full text-left px-3 py-2.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 pr-8
                 ${selectedId === lec.id && !isCreating && !isShowingSettings
                   ? 'bg-white shadow-sm text-indigo-700 border border-gray-200'
                   : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'}`}
@@ -207,6 +308,20 @@ const App: React.FC = () => {
               <FileText className="w-4 h-4 text-gray-400" />
               <span className="truncate">{lec.title || 'Untitled Lecture'}</span>
             </button>
+            <button
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (confirm('Really delete this lecture?')) {
+                    await fetch(`http://localhost:3000/api/lectures/${lec.id}`, { method: 'DELETE' });
+                    fetchLectures();
+                    if (selectedId === lec.id) setSelectedId(null);
+                  }
+                }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
+            </button>
+            </div>
           ))}
         </div>
 
@@ -321,70 +436,248 @@ const App: React.FC = () => {
         {!isCreating && !isShowingSettings && selectedId && lectureData && (
           <div className="flex-1 flex flex-col overflow-hidden">
             {/* Header */}
-            <div className="h-16 border-b border-gray-200 flex items-center justify-between px-6 bg-white shrink-0 z-10">
-              <div className="flex items-center gap-4">
-                <h2 className="text-lg font-bold text-gray-900 truncate max-w-xl">
+            <div className="h-16 border-b border-gray-200 flex items-center justify-between px-6 bg-white shrink-0 z-10 shadow-sm">
+              <div className="flex items-center gap-3 min-w-0 flex-1 mr-4">
+                <h2 className="text-lg font-bold text-gray-900 truncate" title={lectureData.title}>
                   {lectureData.title}
                 </h2>
-                {/* Progress Badge */}
-                <div className="flex items-center gap-2">
-                  {(lectureData.chapters || []).some(c => c.status === 'processing') && (
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-bold animate-pulse">
-                      <RefreshCw className="w-3 h-3 animate-spin" />
-                      Analyzing...
+                <button 
+                    onClick={() => setShowMetaModal(true)}
+                    className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors flex-shrink-0"
+                    title="Edit Metadata"
+                >
+                    <Info className="w-4 h-4" />
+                </button>
+                
+                {/* Progress Badge & Streaming Status */}
+                <div className="flex items-center gap-3 pl-3 border-l border-gray-200">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-500 font-medium whitespace-nowrap">
+                      {(lectureData.chapters || []).filter(c => c.status === 'completed').length} / {(lectureData.chapters || []).length}
                     </span>
+                  </div>
+
+                  {(streamingStatus.active || (lectureData.chapters || []).some(c => c.status === 'processing')) && (
+                    <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-slate-900 rounded-full shadow-sm border border-slate-700 max-w-xs transition-all duration-300">
+                        <span className="relative flex h-2 w-2 flex-shrink-0">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                        </span>
+                        {streamingStatus.message ? (
+                            <span className="text-[10px] text-green-400 font-mono truncate animate-in fade-in slide-in-from-left-2">
+                                &gt; {streamingStatus.message}
+                            </span>
+                        ) : (
+                            <span className="text-[10px] text-slate-400 font-mono">Processing...</span>
+                        )}
+                    </div>
                   )}
-                  <span className="text-xs text-gray-400 font-medium">
-                    {(lectureData.chapters || []).filter(c => c.status === 'completed').length} / {(lectureData.chapters || []).length} Completed
-                  </span>
                 </div>
               </div>
 
-              <div className="flex gap-2">
-                <button
-                  onClick={handleExportPDF}
-                  className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
-                >
-                  <Download className="w-4 h-4" />
-                  PDF Export
-                </button>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                {(lectureData.chapters || []).some(c => c.status === 'error') && (
+                  <button
+                    onClick={async () => {
+                      try {
+                        await fetch(`http://localhost:3000/api/lectures/${selectedId}/retry`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ apiKey: settings.apiKey })
+                        });
+                        alert("Retry started!");
+                      } catch (e) {
+                        alert("Retry failed");
+                      }
+                    }}
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-amber-500 hover:bg-amber-600 rounded-lg transition-colors shadow-sm"
+                  >
+                    <RefreshCw className="w-4 h-4" />
+                    <span className="hidden sm:inline">Retry</span>
+                  </button>
+                )}
+                {lectureData.correction_stats && (
+                  <button
+                    onClick={() => setShowCorrectionModal(true)}
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-100 rounded-lg transition-colors"
+                    title="Fact Check Report"
+                  >
+                    <CheckCircle className="w-4 h-4" />
+                    <span className="hidden sm:inline">Report</span>
+                  </button>
+                )}
+                <div className="relative" ref={pdfDropdownRef}>
+                  <button
+                    onClick={() => setShowPdfDropdown(!showPdfDropdown)}
+                    className="flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-slate-700 hover:text-slate-900 hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors"
+                  >
+                    <Download className="w-4 h-4" />
+                    <span className="hidden sm:inline">PDF</span>
+                  </button>
+                  
+                  {showPdfDropdown && (
+                    <div className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 z-50 py-2 animate-in fade-in slide-in-from-top-2">
+                      <button
+                        onClick={() => { handleExportPDF('full'); setShowPdfDropdown(false); }}
+                        className="w-full text-left px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+                      >
+                        <FileText className="w-4 h-4 text-slate-400" />
+                        Full Lecture Note
+                      </button>
+                      <button
+                        onClick={() => { handleExportPDF('summary'); setShowPdfDropdown(false); }}
+                        className="w-full text-left px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 flex items-center gap-2"
+                      >
+                        <Layout className="w-4 h-4 text-slate-400" />
+                        Summary Only
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
+
+            {/* Correction Modal */}
+            {showCorrectionModal && lectureData.correction_stats && (
+              <CorrectionReportModal
+                stats={lectureData.correction_stats}
+                onClose={() => setShowCorrectionModal(false)}
+              />
+            )}
+
+            {/* Metadata Modal */}
+            {showMetaModal && (
+              <MetadataModal
+                note={lectureData as any} 
+                onClose={() => setShowMetaModal(false)}
+                onSave={async (updatedMeta) => {
+                    try {
+                        await fetch(`http://localhost:3000/api/lectures/${selectedId}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(updatedMeta)
+                        });
+                        setLectureData(prev => prev ? { ...prev, ...updatedMeta } : null);
+                        // 목록도 갱신 (제목 변경 시)
+                        if (updatedMeta.title) fetchLectures();
+                    } catch (e) {
+                        alert("Update failed");
+                    }
+                }}
+              />
+            )}
 
             {/* Content Area (Using LecturePreview but passing prop) */}
             <div className="flex-1 overflow-auto bg-gray-50/30">
               {/* LecturePreview Component Integration */}
-              {/* NOTE: LecturePreview expects 'lectureNote' prop. We construct it from lectureData */}
               <LecturePreview
                 note={{
                   title: lectureData.title,
-                  overview: lectureData.overview || "Loading overview...",
+                  overview: lectureData.overview || "",
+                  author: lectureData.author,
+                  tags: lectureData.tags,
+                  finalSummary: lectureData.finalSummary,
                   chapters: (lectureData.chapters || []).map(c => ({
                     ...c,
-                    // timeRange 필드 매핑
                     timeRange: c.startTime && c.endTime ? `${c.startTime} ~ ${c.endTime}` : undefined,
-                    // If processing, show placeholder
                     narrative: c.status === 'completed' ? c.narrative : (c.status === 'processing' ? '...\n\nAnalyzing this chapter...' : 'Pending analysis...')
                   })) as any,
-                  allGlossary: [], // TODO: Collect from chapters
+                  allGlossary: [], 
                   allActionItems: [],
                   allWarnings: [],
                   qualityReport: undefined
                 }}
                 onDownload={handleExportPDF}
-                onDeepDive={(chapterId) => {
-                  console.log('Deep dive requested for:', chapterId);
-                  // TODO: Implement deep dive trigger if needed
+                onDeepDive={async (chapterId) => {
+                  try {
+                    setStreamingStatus({ message: 'Deep dive 분석 시작...', active: true });
+                    const res = await fetch(`http://localhost:3000/api/chapters/${chapterId}/regenerate`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        feedback: '더 상세하고 깊이 있는 분석을 해주세요. 강사의 인용을 더 많이 포함하고, 각 개념에 대한 해석을 풍부하게 작성해주세요.',
+                        apiKey: settings.apiKey
+                      })
+                    });
+                    if (!res.ok) {
+                      const err = await res.json();
+                      throw new Error(err.error || 'Deep dive 요청 실패');
+                    }
+                    // 상태 갱신을 위해 데이터 다시 로드
+                    setTimeout(() => fetchLectureDetail(selectedId!), 1000);
+                  } catch (e: any) {
+                    alert('Deep dive 실패: ' + e.message);
+                    setStreamingStatus({ message: '', active: false });
+                  }
+                }}
+                onSaveChapter={async (chapterId, updates) => {
+                   try {
+                     await fetch(`http://localhost:3000/api/chapters/${chapterId}`, {
+                       method: 'PUT',
+                       headers: { 'Content-Type': 'application/json' },
+                       body: JSON.stringify(updates)
+                     });
+                     // Optimistic update
+                     setLectureData(prev => {
+                       if (!prev) return null;
+                       return {
+                         ...prev,
+                         chapters: prev.chapters.map(ch => 
+                           ch.id === chapterId ? { ...ch, ...updates } : ch
+                         )
+                       };
+                     });
+                   } catch (e) {
+                     alert("저장 실패");
+                   }
                 }}
                 onRegenerateWithFeedback={async (chId, feedback) => {
                   try {
-                    await fetch(`http://localhost:3000/api/chapters/${chId}/regenerate`, {
+                    const res = await fetch(`http://localhost:3000/api/chapters/${chId}/regenerate`, {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ feedback })
+                      body: JSON.stringify({ feedback, apiKey: settings.apiKey })
                     });
-                  } catch (e) {
-                    alert("재생성 요청 실패");
+                    if (!res.ok) {
+                      const err = await res.json();
+                      throw new Error(err.error || '재생성 실패');
+                    }
+                    setTimeout(() => fetchLectureDetail(selectedId!), 1000);
+                  } catch (e: any) {
+                    alert("재생성 요청 실패: " + e.message);
+                  }
+                }}
+                onGenerateFinalSummary={async () => {
+                  try {
+                    const res = await fetch(`http://localhost:3000/api/lectures/${selectedId}/generate-summary`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ apiKey: settings.apiKey })
+                    });
+                    if (!res.ok) {
+                      const err = await res.json();
+                      throw new Error(err.error || 'Generation failed');
+                    }
+                    setStreamingStatus({ message: 'Generating Final Summary...', active: true });
+                  } catch (e: any) {
+                    alert("Final Summary 생성 실패: " + e.message);
+                  }
+                }}
+                onContinueProcessing={async () => {
+                  try {
+                    const res = await fetch(`http://localhost:3000/api/lectures/${selectedId}/continue-processing`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ apiKey: settings.apiKey })
+                    });
+                    if (!res.ok) {
+                      const err = await res.json();
+                      throw new Error(err.error || 'Continue failed');
+                    }
+                    const data = await res.json();
+                    setStreamingStatus({ message: `Resuming ${data.pendingCount} chapters...`, active: true });
+                  } catch (e: any) {
+                    alert("이어서 처리 실패: " + e.message);
                   }
                 }}
               />

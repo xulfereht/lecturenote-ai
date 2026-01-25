@@ -86,7 +86,7 @@ const DEFAULT_SETTINGS: AISettings = {
   apiKey: '',
   temperature: 0.7,
   maxTokens: 8192,
-  llmCorrectionEnabled: false
+  llmCorrectionEnabled: true
 };
 
 /**
